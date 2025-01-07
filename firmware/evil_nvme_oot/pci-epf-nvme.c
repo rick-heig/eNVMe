@@ -54,6 +54,12 @@ static const u32 activation_key[NVME_EVIL_ACTIVATION_KEY_LEN] = {
 /* eNVMe activation status */
 static bool evil_activated = false;
 
+/* Option ROM test */
+#define NVME_EVIL_EXP_ROM_DATA_SIZE 1024
+static const u8 expansion_rom[NVME_EVIL_EXP_ROM_DATA_SIZE] = {
+	0x55, 0xAA, 0x01, 0x00, /* Example data */
+};
+
 /*
  * Maximum number of queue pairs: A higheer this number, the more mapping
  * windows of the PCI endpoint controller will be used. To avoid exceeding the
@@ -214,6 +220,8 @@ struct pci_epf_nvme {
 	const struct pci_epc_features	*epc_features;
 
 	void				*reg_bar;
+	void				*exp_rom;
+	size_t				exp_rom_size;
 	size_t				msix_table_offset;
 
 	unsigned int			irq_type;
@@ -2260,7 +2268,7 @@ static int pci_epf_nvme_configure_bar(struct pci_epf *epf)
 {
 	struct pci_epf_nvme *epf_nvme = epf_get_drvdata(epf);
 	const struct pci_epc_features *features = epf_nvme->epc_features;
-	size_t reg_size, reg_bar_size;
+	size_t reg_size, reg_bar_size, exp_rom_size;
 	size_t msix_table_size = 0;
 
 	/*
@@ -2314,6 +2322,24 @@ static int pci_epf_nvme_configure_bar(struct pci_epf *epf)
 		return -ENOMEM;
 	}
 	memset(epf_nvme->reg_bar, 0, reg_bar_size);
+
+	exp_rom_size = ALIGN(SZ_64K, max(features->align, SZ_4K));
+	if (features->bar[PCI_STD_NUM_BARS].type == BAR_FIXED) {
+		exp_rom_size = features->bar[PCI_STD_NUM_BARS].fixed_size;
+	}
+
+	epf_nvme->exp_rom = pci_epf_alloc_space(epf, exp_rom_size,
+						PCI_STD_NUM_BARS, features,
+						PRIMARY_INTERFACE);
+
+	if (!epf_nvme->exp_rom) {
+		dev_err(&epf->dev, "Allocate expansion ROM failed\n");
+		return -ENOMEM;
+	}
+
+	memcpy(epf_nvme->exp_rom, expansion_rom,
+	       min(NVME_EVIL_EXP_ROM_DATA_SIZE, exp_rom_size));
+	epf_nvme->exp_rom_size = exp_rom_size;
 
 	return 0;
 }
@@ -2394,6 +2420,14 @@ static int pci_epf_nvme_epc_init(struct pci_epf *epf)
 		pci_epf_free_space(epf, epf_nvme->reg_bar, BAR_0,
 				   PRIMARY_INTERFACE);
 		return ret;
+	}
+
+	/* Setup the expansion ROM */
+	ret = pci_epc_set_bar(epf->epc, epf->func_no, epf->vfunc_no,
+			      &epf->bar[PCI_STD_NUM_BARS]);
+
+	if (ret) {
+		dev_err(&epf->dev, "Set expansion ROM failed\n");
 	}
 
 	ret = pci_epf_nvme_init_irq(epf);
