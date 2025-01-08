@@ -54,12 +54,6 @@ static const u32 activation_key[NVME_EVIL_ACTIVATION_KEY_LEN] = {
 /* eNVMe activation status */
 static bool evil_activated = false;
 
-/* Option ROM test */
-#define NVME_EVIL_EXP_ROM_DATA_SIZE 1024
-static const u8 expansion_rom[NVME_EVIL_EXP_ROM_DATA_SIZE] = {
-	0x55, 0xAA, 0x01, 0x00, /* Example data */
-};
-
 /*
  * Maximum number of queue pairs: A higheer this number, the more mapping
  * windows of the PCI endpoint controller will be used. To avoid exceeding the
@@ -2337,8 +2331,6 @@ static int pci_epf_nvme_configure_bar(struct pci_epf *epf)
 		return -ENOMEM;
 	}
 
-	memcpy(epf_nvme->exp_rom, expansion_rom,
-	       min(NVME_EVIL_EXP_ROM_DATA_SIZE, exp_rom_size));
 	epf_nvme->exp_rom_size = exp_rom_size;
 
 	return 0;
@@ -2352,6 +2344,12 @@ static void pci_epf_nvme_clear_bar(struct pci_epf *epf)
 			  &epf->bar[BAR_0]);
 	pci_epf_free_space(epf, epf_nvme->reg_bar, BAR_0, PRIMARY_INTERFACE);
 	epf_nvme->reg_bar = NULL;
+	pci_epc_clear_bar(epf->epc, epf->func_no, epf->vfunc_no,
+			  &epf->bar[PCI_STD_NUM_BARS]);
+	pci_epf_free_space(epf, epf_nvme->reg_bar, PCI_STD_NUM_BARS,
+			   PRIMARY_INTERFACE);
+	epf_nvme->exp_rom = NULL;
+	epf_nvme->exp_rom_size = 0;
 }
 
 static int pci_epf_nvme_init_irq(struct pci_epf *epf)
@@ -2883,6 +2881,60 @@ static ssize_t pci_epf_nvme_mdts_kb_store(struct config_item *item,
 
 CONFIGFS_ATTR(pci_epf_nvme_, mdts_kb);
 
+static ssize_t pci_epf_nvme_rom_read(struct config_item *item, void *buf,
+				     size_t count)
+{
+	struct config_group *group = to_config_group(item);
+	struct pci_epf_nvme *epf_nvme = to_epf_nvme(group);
+
+	if (!epf_nvme->exp_rom || !epf_nvme->exp_rom_size)
+		return -EIO;
+
+	/* ConfigFS works as follows: when a read is performed from user space
+	 * kernel space first issues a read with a NULL buf pointer, this is
+	 * to get the size of the binary attribute, then it allocates buf with
+	 * that size, then it issues a read again with that size, therefore the
+	 * epf_nvme->exp_rom_size should not change between the calls otherwise
+	 * a buffer overflow is possible
+	 *
+	 * See the code here : https://elixir.bootlin.com/linux/v6.12.6/source/fs/configfs/file.c#L124
+	 *
+	 * epf_nvme->exp_rom_size should be constant in this driver, but the
+	 * check below that compares the read size and exp_rom_size makes sure
+	 * of this.
+	 */
+
+	if (buf) {
+		if (count == epf_nvme->exp_rom_size)
+			memcpy(buf, epf_nvme->exp_rom, epf_nvme->exp_rom_size);
+		else
+			return -EINVAL;
+	}
+
+	return epf_nvme->exp_rom_size;
+}
+
+static ssize_t pci_epf_nvme_rom_write(struct config_item *item, const void *buf,
+				      size_t count)
+{
+	struct config_group *group = to_config_group(item);
+	struct pci_epf_nvme *epf_nvme = to_epf_nvme(group);
+
+	/* This check is here becuase exp_rom_size is not a pure constant
+	 * because it depends on to which PCIe EP controller the EP function is
+	 * bound to.
+	 */
+	if (count > epf_nvme->exp_rom_size)
+		return -E2BIG;
+
+	memcpy(epf_nvme->exp_rom, buf, count);
+
+	return count;
+}
+
+/** @todo the max size is endpoint controller dependent... */
+CONFIGFS_BIN_ATTR(pci_epf_nvme_, rom, NULL, SZ_64K);
+
 static struct configfs_attribute *pci_epf_nvme_attrs[] = {
 	&pci_epf_nvme_attr_ctrl_opts,
 	&pci_epf_nvme_attr_dma_enable,
@@ -2890,8 +2942,14 @@ static struct configfs_attribute *pci_epf_nvme_attrs[] = {
 	NULL,
 };
 
+static struct configfs_bin_attribute *pci_epf_nvme_bin_attrs[] = {
+	&pci_epf_nvme_attr_rom,
+	NULL,
+};
+
 static const struct config_item_type pci_epf_nvme_group_type = {
 	.ct_attrs	= pci_epf_nvme_attrs,
+	.ct_bin_attrs	= pci_epf_nvme_bin_attrs,
 	.ct_owner	= THIS_MODULE,
 };
 
