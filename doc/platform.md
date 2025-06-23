@@ -107,7 +107,7 @@ sudo chroot mount_rootfs qemu-aarch64-static /bin/bash
 This is run in the chroot above.
 
 ```shell
-# Set a hostname for the CSD where X is the node number in the cluster
+# Set a hostname for the device
 echo "ENVME" > /etc/hostname
 echo "127.0.0.1 ENVME" >> /etc/hosts
 # Set fstab
