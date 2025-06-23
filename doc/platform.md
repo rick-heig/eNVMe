@@ -211,9 +211,9 @@ sudo cp -r linux/. /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/
 # Remove the .git directory (Do this otherwise Oot built .ko will take git commit hash in version and will refuse to be inserted)
 sudo rm -rf /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/.git
 # Copy the .config from Buildroot
-sudo cp buildroot/output/build/linux-custom/.config /media/rick/rootfs1/lib/modules/6.12.0-rc3/build/
+sudo cp buildroot/output/build/linux-custom/.config /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/
 # Copy Module.symvers
-sudo cp buildroot/output/build/linux-custom/Module.symvers /media/rick/rootfs1/lib/modules/6.12.0-rc3/build/
+sudo cp buildroot/output/build/linux-custom/Module.symvers /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/
 
 # Copy the firmware (allows to build on embedded board)
 cp -r ../firmware /media/<user>/RootFS/home/ubuntu/
