@@ -230,7 +230,7 @@ sudo apt update
 sudo apt install libncurses-dev gawk flex bison openssl libssl-dev dkms libelf-dev libudev-dev libpci-dev libiberty-dev autoconf llvm build-essential
 ```
 
-### OoT Build
+### OoT Build
 
 See [firmware/README.md](../firmware/README.md).
 
