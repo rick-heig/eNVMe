@@ -2656,7 +2656,7 @@ static int nvmet_pci_epf_probe(struct pci_epf *epf,
 	dev_t cdev;
 	int ret;
 
-	dev_info(&epf->dev, "eNVMe driver probed !\n");
+	dev_info(&epf->dev, "eNVMe driver built on %s at %s\n", __DATE__, __TIME__);
 
 	/* This is just an example on how to call userspace commands from here */
 	char *argv[] = { "/bin/sh", "-c", "echo Hello from kernel space! > /tmp/kernel_output.txt", NULL };
