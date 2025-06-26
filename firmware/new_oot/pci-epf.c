@@ -8,6 +8,7 @@
  */
 #define pr_fmt(fmt) KBUILD_MODNAME ": " fmt
 
+#include <linux/cdev.h>
 #include <linux/delay.h>
 #include <linux/dmaengine.h>
 #include <linux/io.h>
@@ -219,6 +220,14 @@ struct nvmet_pci_epf_ctrl {
 };
 
 /*
+ * Structure for PCI character device
+ */
+struct nvmet_cdev_data {
+	struct nvmet_pci_epf		*nvme_epf;
+	struct cdev			cdev;
+};
+
+/*
  * PCI EPF driver private data.
  */
 struct nvmet_pci_epf {
@@ -247,6 +256,9 @@ struct nvmet_pci_epf {
 	__le16				portid;
 	char				subsysnqn[NVMF_NQN_SIZE];
 	unsigned int			mdts_kb;
+
+	struct class			*char_class;
+	struct nvmet_cdev_data		chardev_data;
 };
 
 static inline u32 nvmet_pci_epf_bar_read32(struct nvmet_pci_epf_ctrl *ctrl,
@@ -2510,6 +2522,122 @@ static void nvmet_pci_epf_unbind(struct pci_epf *epf)
 	nvmet_pci_epf_free_bar(nvme_epf);
 }
 
+
+static int nvmet_pci_dev_open(struct inode* inode, struct file* file) {
+	struct nvmet_cdev_data *pencdd = container_of(inode->i_cdev,
+		struct nvmet_cdev_data, cdev);
+	file->private_data = pencdd;
+	return 0;
+}
+
+static ssize_t nvmet_pci_dev_read(struct file* file, char* buffer, size_t len, loff_t* offset) {
+	struct nvmet_cdev_data *pencdd = file->private_data;
+	struct nvmet_pci_epf *nvme_epf = pencdd->nvme_epf;
+	struct nvmet_pci_epf_ctrl *ctrl = &nvme_epf->ctrl;
+	struct pci_epf *epf = nvme_epf->epf;
+	struct device *dev = &epf->dev;
+	struct nvmet_pci_epf_segment seg;
+	int error_count = 0;
+	int ret = 0;
+	size_t bytes_transfered = 0, btt = 0;
+	const size_t LOCAL_BUFFER_SIZE = SZ_64K;
+	if (!offset)
+		return -EINVAL;
+
+	if (!ctrl->link_up) {
+		dev_warn(dev, "Link is down cannot read\n");
+		return -EFAULT;
+	}
+
+	seg.buf = kzalloc(LOCAL_BUFFER_SIZE, GFP_KERNEL);
+	if (!seg.buf)
+		return -ENOMEM;
+
+	dev_dbg(dev, "Request to read %zu bytes from offset 0x%llx\n", len, *offset);
+
+	while (bytes_transfered < len) {
+		btt = min(len - bytes_transfered, LOCAL_BUFFER_SIZE);
+		//dev_dbg(dev, "btt: %zu, bytes_transfered: %zu\n", btt, bytes_transfered);
+		seg.pci_addr = *offset + bytes_transfered;
+		seg.length = btt;
+		ret = nvmet_pci_epf_transfer_seg(nvme_epf, &seg, DMA_FROM_DEVICE);
+		if (ret < 0) {
+			dev_err(dev, "Failed to read over PCI\n");
+			return ret;
+		}
+		/* Maybe this is possible in zero-copy */
+		error_count += copy_to_user(buffer + bytes_transfered, seg.buf, btt);
+		bytes_transfered += btt;
+	}
+	kfree(seg.buf);
+
+	if (error_count != 0) {
+		dev_err(dev, "Failed to send %d characters to the user\n", error_count);
+		return -EFAULT;
+	}
+
+	*offset += len;
+	return len;
+}
+
+static ssize_t nvmet_pci_dev_write(struct file* file, const char* buffer, size_t len, loff_t* offset) {
+	struct nvmet_cdev_data *pencdd = file->private_data;
+	struct nvmet_pci_epf *nvme_epf = pencdd->nvme_epf;
+	struct nvmet_pci_epf_ctrl *ctrl = &nvme_epf->ctrl;
+	struct pci_epf *epf = nvme_epf->epf;
+	struct device *dev = &epf->dev;
+	struct nvmet_pci_epf_segment seg;
+	size_t bytes_transfered = 0, btt = 0;
+	const size_t LOCAL_BUFFER_SIZE = SZ_64K;
+	int ret = 0;
+	if (!offset)
+		return -EINVAL;
+
+	dev_dbg(dev, "Request to write %zu bytes at offset 0x%llx\n", len, *offset);
+
+	if (!ctrl->link_up) {
+		dev_warn(dev, "Link is down cannot write\n");
+		return -EFAULT;
+	}
+
+	seg.buf = kzalloc(LOCAL_BUFFER_SIZE, GFP_KERNEL);
+	if (!seg.buf)
+		return -ENOMEM;
+
+	while (bytes_transfered < len) {
+		btt = min(len - bytes_transfered, LOCAL_BUFFER_SIZE);
+		//dev_dbg(dev, "btt: %zu, bytes_transfered: %zu\n", btt, bytes_transfered);
+		/* Maybe this is possible in zero-copy */
+		if (copy_from_user(seg.buf, buffer + bytes_transfered, btt)) {
+			dev_err(dev, "Failed to copy data from user\n");
+			return -EFAULT;
+		}
+		seg.pci_addr = *offset + bytes_transfered;
+		seg.length = btt;
+		ret = nvmet_pci_epf_transfer_seg(nvme_epf, &seg, DMA_TO_DEVICE);
+		if (ret < 0) {
+			dev_err(dev, "Failed to write over PCI\n");
+			return ret;
+		}
+		bytes_transfered += btt;
+	}
+	kfree(seg.buf);
+
+	*offset += len;
+	return len;
+}
+
+static int nvmet_pci_dev_release(struct inode* inode, struct file* file) {
+	return 0;
+}
+
+static struct file_operations fops = {
+	.open		= nvmet_pci_dev_open,
+	.read		= nvmet_pci_dev_read,
+	.write		= nvmet_pci_dev_write,
+	.release	= nvmet_pci_dev_release,
+};
+
 static struct pci_epf_header nvme_epf_pci_header = {
 	.vendorid	= PCI_ANY_ID,
 	.deviceid	= PCI_ANY_ID,
@@ -2519,11 +2647,29 @@ static struct pci_epf_header nvme_epf_pci_header = {
 	.interrupt_pin	= PCI_INTERRUPT_INTA,
 };
 
+static int dev_major = 0;
+
 static int nvmet_pci_epf_probe(struct pci_epf *epf,
 			       const struct pci_epf_device_id *id)
 {
 	struct nvmet_pci_epf *nvme_epf;
+	dev_t cdev;
 	int ret;
+
+	dev_info(&epf->dev, "eNVMe driver probed !\n");
+
+	/* This is just an example on how to call userspace commands from here */
+	char *argv[] = { "/bin/sh", "-c", "echo Hello from kernel space! > /tmp/kernel_output.txt", NULL };
+	static char *envp[] = { "HOME=/", "PATH=/sbin:/bin:/usr/sbin:/usr/bin" , NULL};
+	ret = call_usermodehelper(argv[0], argv, envp, UMH_WAIT_PROC);
+	if (ret != 0) {
+		dev_err(&epf->dev,
+			"call_usermodehelper() failed with return code: %d\n",
+			ret);
+	} else {
+		dev_info(&epf->dev,
+			 "User space program executed successfully\n");
+	}
 
 	nvme_epf = devm_kzalloc(&epf->dev, sizeof(*nvme_epf), GFP_KERNEL);
 	if (!nvme_epf)
@@ -2539,6 +2685,36 @@ static int nvmet_pci_epf_probe(struct pci_epf *epf,
 	epf->event_ops = &nvmet_pci_epf_event_ops;
 	epf->header = &nvme_epf_pci_header;
 	epf_set_drvdata(epf, nvme_epf);
+
+	/* allocate chardev region and assign Major number */
+	ret = alloc_chrdev_region(&cdev, 0, 1, "nvmet_pci_cdev");
+	if (ret) {
+		dev_err(&epf->dev, "Could not alloc chrdev region\n");
+		return ret;
+	}
+
+	dev_major = MAJOR(cdev);
+
+	/* Add char device that exposes PCI space */
+	nvme_epf->char_class = class_create("nvmet_pci_cdev");
+	if (IS_ERR_OR_NULL(nvme_epf->char_class)) {
+		dev_err(&epf->dev, "Could not create class\n");
+		return PTR_ERR(nvme_epf->char_class);
+	}
+
+	cdev_init(&nvme_epf->chardev_data.cdev, &fops);
+	nvme_epf->chardev_data.cdev.owner = THIS_MODULE;
+
+	ret = cdev_add(&nvme_epf->chardev_data.cdev, MKDEV(dev_major, 0), 1);
+	if (ret < 0) {
+		dev_err(&epf->dev, "Could not add character device: %d\n", ret);
+		return ret;
+	}
+
+	device_create(nvme_epf->char_class, NULL, MKDEV(dev_major, 0), NULL,
+		      "pci-io");
+
+	nvme_epf->chardev_data.nvme_epf = nvme_epf;
 
 	return 0;
 }
