@@ -7,6 +7,8 @@ Install dependencies
 sudo apt install libusb-1.0-0-dev build-essential pkgconf liblz4-dev libfuse-dev
 ```
 
+Build everything
+
 ```shell
 mkdir PCILeech && cd PCILeech
 # Clone Leechcore
