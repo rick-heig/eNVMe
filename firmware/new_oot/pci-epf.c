@@ -257,6 +257,8 @@ struct nvmet_pci_epf {
 	char				subsysnqn[NVMF_NQN_SIZE];
 	unsigned int			mdts_kb;
 
+	bool				user_path_enable;
+
 	struct class			*char_class;
 	struct nvmet_cdev_data		chardev_data;
 };
@@ -2820,10 +2822,36 @@ static ssize_t nvmet_pci_epf_mdts_kb_store(struct config_item *item,
 
 CONFIGFS_ATTR(nvmet_pci_epf_, mdts_kb);
 
+static ssize_t nvmet_pci_epf_user_path_enable_show(struct config_item *item,
+						   char *page)
+{
+	struct config_group *group = to_config_group(item);
+	struct nvmet_pci_epf *nvme_epf = to_nvme_epf(group);
+
+	return sysfs_emit(page, "%d\n", nvme_epf->user_path_enable);
+}
+
+static ssize_t nvmet_pci_epf_user_path_enable_store(struct config_item *item,
+						    const char *page, size_t len)
+{
+	struct config_group *group = to_config_group(item);
+	struct nvmet_pci_epf *nvme_epf = to_nvme_epf(group);
+	int ret;
+
+	ret = kstrtobool(page, &nvme_epf->user_path_enable);
+	if (ret)
+		return ret;
+
+	return len;
+}
+
+CONFIGFS_ATTR(nvmet_pci_epf_, user_path_enable);
+
 static struct configfs_attribute *nvmet_pci_epf_attrs[] = {
 	&nvmet_pci_epf_attr_portid,
 	&nvmet_pci_epf_attr_subsysnqn,
 	&nvmet_pci_epf_attr_mdts_kb,
+	&nvmet_pci_epf_attr_user_path_enable,
 	NULL,
 };
 
