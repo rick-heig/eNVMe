@@ -517,7 +517,7 @@ unlock:
 static inline int nvmet_pci_epf_transfer_seg(struct nvmet_pci_epf *nvme_epf,
 		struct nvmet_pci_epf_segment *seg, enum dma_data_direction dir)
 {
-	if (nvme_epf->dma_enabled)
+	if (nvme_epf->dma_enabled && seg->length > SZ_4K)
 		return nvmet_pci_epf_dma_transfer(nvme_epf, seg, dir);
 
 	return nvmet_pci_epf_mmio_transfer(nvme_epf, seg, dir);
