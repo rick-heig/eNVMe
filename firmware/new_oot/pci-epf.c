@@ -227,6 +227,24 @@ struct nvmet_cdev_data {
 	struct cdev			cdev;
 };
 
+struct envme_file_data {
+	struct nvmet_pci_epf		*nvme_epf;
+	struct nvmet_pci_epf_iod	*iod;
+	struct cdev			cdev;
+	struct mutex			mutex;
+};
+
+/*
+ * Size of the FIFOs used in driver, should be bigger than MQES
+ */
+#define PCI_EPF_NVME_FIFO_SIZE 2048
+
+static DEFINE_SPINLOCK(touser_wr_lk);
+static DEFINE_SPINLOCK(touser_rd_lk);
+static DECLARE_KFIFO(touser_fifo, typeof(struct nvmet_pci_epf_iod *),
+		     PCI_EPF_NVME_FIFO_SIZE);
+DECLARE_WAIT_QUEUE_HEAD(touser_wq);
+
 /*
  * PCI EPF driver private data.
  */
@@ -258,6 +276,8 @@ struct nvmet_pci_epf {
 	unsigned int			mdts_kb;
 
 	bool				user_path_enable;
+	struct envme_file_data		user_path_queue;
+	struct class			*envme_class;
 
 	struct class			*char_class;
 	struct nvmet_cdev_data		chardev_data;
@@ -1732,6 +1752,18 @@ static void nvmet_pci_epf_exec_iod_work(struct work_struct *work)
 		nvmet_pci_epf_transfer_iod_data(iod);
 	}
 
+	/* Read commands need to go through user space if enabled.
+	   For the moment, no data is processed in user space so it is already
+	   sent to the host above, it is just the completion that is delayed. */
+	/// @todo if data is passed through user space, move this + transfer
+	if (iod->ctrl->nvme_epf->user_path_enable &&
+	    iod->cmd.common.opcode == nvme_cmd_read) {
+		/* Lock because this could be executed by multiple workers */
+		kfifo_in_spinlocked(&touser_fifo, &iod, 1, &touser_wr_lk);
+		wake_up(&touser_wq);
+		return; /* Completion will be sent once userspace tells us */
+	}
+
 complete:
 	nvmet_pci_epf_complete_iod(iod);
 }
@@ -2640,6 +2672,159 @@ static struct file_operations fops = {
 	.release	= nvmet_pci_dev_release,
 };
 
+/* eNVMe: char device user space redirections */
+static int envme_open(struct inode *inode, struct file *file)
+{
+	struct envme_file_data *efd = container_of(inode->i_cdev,
+						   struct envme_file_data, cdev);
+
+	/* Allow only one process to open the file at a time */
+	if (!mutex_trylock(&efd->mutex))
+		return -EBUSY;
+
+	efd->iod = NULL;
+	file->private_data = efd;
+
+	/* The private data is used to store the iod currently being worked on,
+	   when read an iod gets assigned, when written this iod is used */
+
+	return 0;
+}
+
+static int envme_release(struct inode *inode, struct file *file)
+{
+	struct envme_file_data *efd = file->private_data;
+
+	mutex_unlock(&efd->mutex);
+
+	if (efd->iod) {
+		/* If there is an unprocessed iod, queue it, with error */
+		efd->iod->status = NVME_SC_INTERNAL;
+		nvmet_pci_epf_complete_iod(efd->iod);
+		efd->iod = NULL;
+	}
+
+	return 0;
+}
+
+static ssize_t envme_read(struct file *file, char __user *buf, size_t count,
+			  loff_t *offset)
+{
+	int ret;
+	struct envme_file_data *efd = file->private_data;
+	struct nvmet_pci_epf *nvme_epf = efd->nvme_epf;
+	struct device *dev = nvme_epf->ctrl.dev;
+
+	if (!efd) {
+		dev_err(dev,  "Missing file data pointer !\n");
+		return -EFAULT;
+	}
+
+	if (count < sizeof(struct nvme_command))
+		return -EINVAL;
+
+	if (!buf) {
+		dev_err(dev, "Userspace buffer pointer is NULL\n");
+		return -EFAULT;
+	}
+
+	if (efd->iod) {
+		dev_warn(dev, "Commands should be processed one by one\n");
+		return -EINVAL;
+	}
+
+	/* Wait for a command (maybe there are none to process) */
+	spin_lock(&touser_rd_lk);
+	while (kfifo_is_empty(&touser_fifo)) {
+		spin_unlock(&touser_rd_lk);
+		if (file->f_flags & O_NONBLOCK) /* Do not block */
+			return 0;
+		ret = wait_event_interruptible(touser_wq,
+					       !kfifo_is_empty(&touser_fifo));
+		if (ret < 0) /* Interrupted by signal */
+			return 0;
+		spin_lock(&touser_rd_lk);
+	}
+
+	ret = kfifo_get(&touser_fifo, &efd->iod);
+	spin_unlock(&touser_rd_lk);
+
+	if (ret != 1) {
+		dev_err(dev, "Could not get iod from touser FIFO\n");
+		return -EFAULT;
+	}
+
+	if (!efd->iod) {
+		dev_err(dev, "Missing iod pointer !\n");
+		return -EFAULT;
+	}
+
+	ret = copy_to_user(buf, &efd->iod->cmd, sizeof(efd->iod->cmd));
+	if (ret) {
+		dev_err(dev, "Incomplete copy to user failure\n");
+		goto fail_command;
+	}
+	count = sizeof(efd->iod->cmd);
+
+	/// @todo here we can copy the data buffer if needed (add count check)
+
+	dev_info(dev, "eNVMe: Cmd read from userspace\n");
+
+	return count;
+
+
+fail_command:
+	efd->iod->status = NVME_SC_INTERNAL;
+	nvmet_pci_epf_complete_iod(efd->iod);
+	efd->iod = NULL;
+	return -EFAULT;
+}
+
+static ssize_t envme_write(struct file *file, const char __user *buf, size_t count,
+		   loff_t *offset)
+{
+	struct envme_file_data *efd = file->private_data;
+	struct nvmet_pci_epf *nvme_epf = efd->nvme_epf;
+	struct device *dev = nvme_epf->ctrl.dev;
+
+	if (count < sizeof(struct nvme_completion))
+		return -EINVAL;
+
+	if (!efd->iod) {
+		dev_warn(dev, "No pending command, read by userspace first!\n");
+		return -EINVAL;
+	}
+
+	if (copy_from_user(&efd->iod->cqe, buf, sizeof(efd->iod->cqe))) {
+		dev_err(dev, "Icomplete copy from user failure\n");
+		goto fail_command;
+	}
+
+	/// @todo here we can copy the data buffer if needed (add count check)
+
+	/* Since for the moment we only do read commands, we complete directly */
+	nvmet_pci_epf_complete_iod(efd->iod);
+	efd->iod = NULL;
+
+	dev_info(dev, "eNVMe: Cqe write from userspace\n");
+
+	return count;
+
+fail_command:
+	efd->iod->status = NVME_SC_INTERNAL;
+	nvmet_pci_epf_complete_iod(efd->iod);
+	efd->iod = NULL;
+	return -EFAULT;
+}
+
+static const struct file_operations envme_fops = {
+	.owner		= THIS_MODULE,
+	.open		= envme_open,
+	.release	= envme_release,
+	.read		= envme_read,
+	.write		= envme_write
+};
+
 static struct pci_epf_header nvme_epf_pci_header = {
 	.vendorid	= PCI_ANY_ID,
 	.deviceid	= PCI_ANY_ID,
@@ -2688,8 +2873,8 @@ static int nvmet_pci_epf_probe(struct pci_epf *epf,
 	epf->header = &nvme_epf_pci_header;
 	epf_set_drvdata(epf, nvme_epf);
 
-	/* allocate chardev region and assign Major number */
-	ret = alloc_chrdev_region(&cdev, 0, 1, "nvmet_pci_cdev");
+	/* allocate chardev region and assign Major number, we want two minors */
+	ret = alloc_chrdev_region(&cdev, 0, 2, "nvmet_pci_cdev");
 	if (ret) {
 		dev_err(&epf->dev, "Could not alloc chrdev region\n");
 		return ret;
@@ -2697,7 +2882,7 @@ static int nvmet_pci_epf_probe(struct pci_epf *epf,
 
 	dev_major = MAJOR(cdev);
 
-	/* Add char device that exposes PCI space */
+	/* 1) Add char device that exposes PCI space */
 	nvme_epf->char_class = class_create("nvmet_pci_cdev");
 	if (IS_ERR_OR_NULL(nvme_epf->char_class)) {
 		dev_err(&epf->dev, "Could not create class\n");
@@ -2717,6 +2902,31 @@ static int nvmet_pci_epf_probe(struct pci_epf *epf,
 		      "pci-io");
 
 	nvme_epf->chardev_data.nvme_epf = nvme_epf;
+
+	/* 2) Char device to route commands through user space */
+
+	INIT_KFIFO(touser_fifo);
+
+	nvme_epf->envme_class = class_create("envmechardev");
+	if (IS_ERR_OR_NULL(nvme_epf->envme_class)) {
+		dev_err(&epf->dev, "Could not create eNVMe class\n");
+		return PTR_ERR(nvme_epf->envme_class);
+	}
+
+	cdev_init(&nvme_epf->user_path_queue.cdev, &envme_fops);
+	nvme_epf->user_path_queue.cdev.owner = THIS_MODULE;
+	ret = cdev_add(&nvme_epf->user_path_queue.cdev,
+			MKDEV(dev_major, 1), 1);
+	if (ret < 0) {
+		dev_err(&epf->dev, "Could not add character device\n");
+		return ret;
+	}
+
+	device_create(nvme_epf->envme_class, NULL, MKDEV(dev_major, 1),
+		      NULL, "envme-io-cmd");
+
+	nvme_epf->user_path_queue.nvme_epf = nvme_epf;
+	mutex_init(&nvme_epf->user_path_queue.mutex);
 
 	return 0;
 }
