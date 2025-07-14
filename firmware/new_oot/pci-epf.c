@@ -539,7 +539,11 @@ unlock:
 static inline int nvmet_pci_epf_transfer_seg(struct nvmet_pci_epf *nvme_epf,
 		struct nvmet_pci_epf_segment *seg, enum dma_data_direction dir)
 {
-	if (nvme_epf->dma_enabled && seg->length > SZ_4K)
+	//dev_info(nvme_epf->ctrl.dev, "PCI transfer %s at %#0llx length %d\n",
+	//	 (dir == DMA_FROM_DEVICE) ? "READ" : "WRITE", seg->pci_addr, seg->length);
+
+	//if (nvme_epf->dma_enabled && seg->length >= SZ_4K)
+	if (nvme_epf->dma_enabled)
 		return nvmet_pci_epf_dma_transfer(nvme_epf, seg, dir);
 
 	return nvmet_pci_epf_mmio_transfer(nvme_epf, seg, dir);
@@ -2594,7 +2598,17 @@ static ssize_t nvmet_pci_dev_read(struct file* file, char* buffer, size_t len, l
 		//dev_dbg(dev, "btt: %zu, bytes_transfered: %zu\n", btt, bytes_transfered);
 		seg.pci_addr = *offset + bytes_transfered;
 		seg.length = btt;
-		ret = nvmet_pci_epf_transfer_seg(nvme_epf, &seg, DMA_FROM_DEVICE);
+
+		dev_dbg(dev, "PCI-IO transfer READ at %#0llx length %d\n",
+			seg.pci_addr, seg.length);
+
+		ret = nvmet_pci_epf_mmio_transfer(nvme_epf, &seg, DMA_FROM_DEVICE);
+		/*
+		if (seg.length <= SZ_4K)
+			ret = nvmet_pci_epf_mmio_transfer(nvme_epf, &seg, DMA_FROM_DEVICE);
+		else
+			ret = nvmet_pci_epf_transfer_seg(nvme_epf, &seg, DMA_FROM_DEVICE);
+		*/
 		if (ret < 0) {
 			dev_err(dev, "Failed to read over PCI\n");
 			return ret;
@@ -2648,7 +2662,17 @@ static ssize_t nvmet_pci_dev_write(struct file* file, const char* buffer, size_t
 		}
 		seg.pci_addr = *offset + bytes_transfered;
 		seg.length = btt;
-		ret = nvmet_pci_epf_transfer_seg(nvme_epf, &seg, DMA_TO_DEVICE);
+
+		dev_dbg(dev, "PCI-IO transfer WRITE at %#0llx length %d\n",
+			seg.pci_addr, seg.length);
+
+		ret = nvmet_pci_epf_mmio_transfer(nvme_epf, &seg, DMA_TO_DEVICE);
+		/*
+		if (seg.length <= SZ_4K)
+			ret = nvmet_pci_epf_mmio_transfer(nvme_epf, &seg, DMA_TO_DEVICE);
+		else
+			ret = nvmet_pci_epf_transfer_seg(nvme_epf, &seg, DMA_TO_DEVICE);
+		*/
 		if (ret < 0) {
 			dev_err(dev, "Failed to write over PCI\n");
 			return ret;
