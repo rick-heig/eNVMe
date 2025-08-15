@@ -1,25 +1,40 @@
 # Platform setup
 
-Here are the instructions to setup the eNVMe platform from scratch, a prebuilt SD card image will be provided **TODO** as setting everything up from scratch takes quite some time.
+Here are the instructions to setup the eNVMe platform from scratch, a prebuilt SD card image is provided in the releases section as setting everything up from scratch takes quite some time.
 
 The instructions below were done on an Ubuntu 24.04.1 LTS host system, they should work for any Linux distribution, some changes may be required, e.g., install programs via another package manager etc.
 
+You will need an arm64 cross-compile toolchain and qemu user space emulation to execute arm64 code (used when `chroot` in the arm64 RootFS):
+
+```shell
+sudo apt install gcc-aarch64-linux-gnu qemu-user-static
+```
+
 ## Setup
+
+Clone this repository and go in the work directory.
+
+```shell
+git clone https://github.com/rick-heig/eNVMe.git
+cd eNVMe/work
+```
 
 From the `work` directory :
 
 ### 1. Clone linux, buildroot and build
 
 ```shell
-git clone -b rk3588_ep_v17 --single-branch https://github.com/rick-heig/linux.git
+git clone -b cm3588_on_rock5b_ep_v34 --single-branch https://github.com/rick-heig/linux.git
 ENVME_LINUX_PATH=$(realpath linux)
-git clone -b rk3588_on_rock5b_ep_v15 --single-branch https://github.com/rick-heig/buildroot.git
+git clone -b cm3588_on_rock5b_ep_v33 --single-branch https://github.com/rick-heig/buildroot.git
 cd buildroot
 echo "LINUX_OVERRIDE_SRCDIR = ${ENVME_LINUX_PATH}" > local.mk
 # This is the configuration for the CM3588 board (see note below)
-make cm3588_nas_ep_defconfig
-make
+make cm3588_ep_defconfig
+make # or make TSIX=y # for the NanoPC-T6
 ```
+
+**Note:** While buildroot is building everything, you can perform step 2 and 3 below.
 
 **Note:** because the CM3588 and T6 boards have very similar schematics and the same CPU the image for the CM3588 will boot on the T6, changing the Linux device tree and device tree overlay will be enough. Instructions to do so are given below.
 
@@ -27,45 +42,7 @@ Board information and schematics:
 - https://wiki.friendlyelec.com/wiki/index.php/CM3588
 - https://wiki.friendlyelec.com/wiki/index.php/NanoPC-T6
 
-### 2. Build OoT eNVMe Module
-
-See [firmware/README.md](../firmware/README.md).
-
-### 3. Prepare SD card
-
-```shell
-# Copy data to the SD card
-sudo dd if=output/images/sdcard.img of=/dev/<your SD card device>
-# Sync so that the SD can be safely ejected
-sudo sync
-```
-
-### 4. Resize the partition
-
-```shell
-# Make sure the partitions are unmounted
-sudo umount /dev/<the SD card device>*
-# Open the SD card device with fdisk
-sudo fdisk /dev/<the SD card device> # e.g., /dev/sdg
-# Print the current partition table with 'p' and note the start sector of the RootFS (last) partition
-# Delete the current RootFS partition (it should be partition 1, the last one) with 'd'
-# Create a new partition (number 1) with 'n', set the first sector to be exactly the same as it was above and use the default parameters for the size, keep the signature !
-# write the changes with 'w'
-# Also redo the same in the hybrid MBR, by pressing 'M' to enter, then delete and redo the partition as above
-# Check the filesystem with e2fsck (fix if errors are found)
-sudo e2fsck -f /dev/<the SD card device RootFS partition> # e.g., /dev/sdg1
-# Resize the RootFS
-sudo resize2fs /dev/<the SD card device RootFS partition> # e.g., /dev/sdg1
-# Check the filesystem with e2fsck (fix if errors are found)
-sudo e2fsck -f /dev/<the SD card device RootFS partition> # e.g., /dev/sdg1
-# Make sure changes are written to SD card with sync
-sudo sync
-# Eject and remount
-# check size with
-df -h
-```
-
-### 5. Prepare the Ubuntu 24.04.1 RootFS
+### 2. Prepare the Ubuntu 24.04.1 RootFS
 
 **Note:** The `.img` we mount here has a fixed size, so we can't just copy files to it indefinitely, we copy some small files here, but the rest is copied onto the SD card rather than in the mounted `.img`.
 
@@ -84,16 +61,6 @@ mkdir mount_rootfs
 sudo mount -o loop,offset=$((215040*512)) $(pwd)/noble-preinstalled-server-arm64.img $(pwd)/mount_rootfs
 # Check the rootfs
 ls mount_rootfs
-# Go in the Buildroot Linux build directory
-cd buildroot/output/build/linux-custom
-# Install the drivers (modules) in the RootFS
-sudo ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=../../../../mount_rootfs make modules_install
-# Remove generated symlink
-sudo rm ../../../../mount_rootfs/lib/modules/6.12.0-rc3/build
-# Create a real directory
-sudo mkdir ../../../../mount_rootfs/lib/modules/6.12.0-rc3/build
-# Go back to "work" directory
-cd ../../../..
 # Copy QEMU ARM64 emulator (static binary) into the rootfs (install if you don't have it)
 sudo apt install qemu-user-static
 # The binary can later be removed, or simply leave it if you want to chroot from host again later
@@ -102,7 +69,7 @@ sudo cp $(which qemu-aarch64-static) mount_rootfs/usr/bin/
 sudo chroot mount_rootfs qemu-aarch64-static /bin/bash
 ```
 
-### 6. Configure the RootFS
+### 3. Configure the RootFS
 
 This is run in the chroot above.
 
@@ -114,12 +81,12 @@ echo "127.0.0.1 ENVME" >> /etc/hosts
 echo "/dev/mmcblk1p1	/	ext4	errors=remount-ro	0	1" > /etc/fstab
 # Set a new root password
 passwd
-# Setup networking
+# Setup networking (there will be some warnings, don't worry)
 systemctl enable systemd-networkd
 # Write the networking config below (with vi or other editor)
 vi /etc/systemd/network/ethernet.network
-# Generate and chose locales for the system (there will be some warnings and takes a while)
-# Choose en_US
+# Generate and chose locales for the system (this takes a while)
+# Choose en_US (twice)
 dpkg-reconfigure locales
 # Add a non root user
 adduser ubuntu
@@ -138,55 +105,95 @@ Name=enP4p65s0
 DHCP=yes
 ```
 
-Note this is for the leftmost ethernet port on the T6, you can create a similar config for the other port by using the name `enP2p33s0` (You can create 2 files, one for each interface).
+Note this is for the leftmost ethernet port on the T6 (and only one on the CM3588 NAS Kit), you can create a similar config for the other port by using the name `enP2p33s0` (You can create 2 files, one for each interface).
 
 Note that this config can also be written later in the rootfs from outside the `chroot` environment.
 
-### 7. Replace the old RootFS (on the SD) with the new one
+### 4. Prepare SD card
 
-From the `work` directory
+Please wait for step 1 to finish before continuing...
+
+From the `work/buildroot` directory
 
 ```shell
-# Mount the old RootFS (if not already mounted)
-sudo mount /dev/<sdX1> /media/<user>/RootFS/
-# Copy boot files locally
-sudo cp -rp /media/<user>/RootFS/boot/ .
-# Remove all old files
-sudo rm -rf /media/<user>/RootFS/*
-# Copy all new RootFS files (the 'p' option is to keep permissions)
-sudo cp -rp mount_rootfs/* /media/<user>/RootFS/
-# Put the boot files back
-sudo cp -rp boot /media/<user>/RootFS/
-
-# Before you sync and unmount
-# Copy the other files now (see below)
-
-# Sync to make sure all data is written to SD card
+# Copy data to the SD card (e.g., /dev/sdg)
+sudo dd if=output/images/sdcard.img of=/dev/<your SD card device>
+# Sync so that the SD can be safely ejected
 sudo sync
-# Unmount
-sudo umount /dev/<sdX*>
 ```
 
-### 8. Copy the eNVMe launch script
+### 5. Resize the partition
+
+The default image generated by buildroot is of minimal size (256MB), we will expand the partition on it to take all the space of the SD card.
+
+From the `work/buildroot` directory
 
 ```shell
-sudo cp -p buildroot/board/friendlyelec/cm3588-nas/overlay/root/pci-ep/nvme-epf /media/<user>/RootFS/usr/bin/
+# Make sure the partitions are unmounted
+sudo umount /dev/<the SD card device>* # e.g., /dev/sdg*
+# Open the SD card device with fdisk
+sudo fdisk /dev/<the SD card device> # e.g., /dev/sdg
+# Print the current partition table with 'p' and note the start sector of the RootFS (last) partition
+# Delete the current RootFS partition (it should be partition 1, the last one) with 'd'
+# Create a new partition (number 1) with 'n', set the first sector to be exactly the same as it was above
+# Use the default parameters for the size, and keep the signature !
+# write the changes with 'w'
+# Also redo the same in the hybrid MBR, by pressing 'M' to enter, then delete and redo the partition as above
+# Check the filesystem with e2fsck (fix if errors are found)
+sudo ./output/host/sbin/e2fsck -f /dev/<the SD card RootFS partition> # e.g., /dev/sdg1
+# Resize the RootFS
+sudo ./output/host/sbin/resize2fs /dev/<the SD card RootFS partition> # e.g., /dev/sdg1
+# Check the filesystem with e2fsck (fix if errors are found)
+sudo ./output/host/sbin/e2fsck -f /dev/<the SD card RootFS partition> # e.g., /dev/sdg1
+# Make sure changes are written to SD card with sync
+sudo sync
+# check size with
+lsblk
 ```
+
+
+### 6. Replace the old RootFS (on the SD) with the new one
+
+This is done through a script : `scripts/prepare_sd.sh`. The script will :
+
+- Copy the boot files (kernel, device trees, etc.)
+- Remove the minimal RootFS originally generated by buildroot
+- Copy the Ubuntu RootFS
+- Put the boot files back
+- Copy the scripts to launch the eNVMe firmware
+- Install the kernel modules (drivers)
+- Prepare the `/lib/modules/build` directory to allow building out of tree (OoT) modules on the board
+- Copy the eNVMe firmware (so we can edit it on-board and compile/install it)
+
+Feel free to have a look inside the script for the actual commands
+
+```shell
+# The script can be launched from any directory, e.g., the work directory
+../scripts/prepare_sd.sh --sd-dev /dev/<the SD card device> # e.g., /dev/sdg
+# The script will show the SD device and ask for confirmation before preparing it
+# This is to avoid mounting and deleting files from another device by user error
+```
+
+This takes a while, especially with slow SD cards...
 
 ### (Optional/for T6) Copy other device tree blobs and overlays
 
-This is necessary if you build for the FriendlyElec NanoPC T6 board.
+If you have built in buildroot with `make TSIX=y` you have nothing to do, your build is for the T6.
 
-in the `work/buildroot` directory (you must already have built it once and setup everything), for example :
+If you have just build with `make` your build is for the CM3588 + NAS Kit but you can easily prepare an SD card that can be used with both models.
+
+in the `work` directory (you must already have built it once and setup everything) copy the T6 related device tree blobs.
 
 ```shell
-sudo cp output/build/linux-custom/arch/arm64/boot/dts/rockchip/rk3588-nanopc-t6.dtb /media/<user>/RootFS/boot/
-sudo cp output/build/linux-custom/arch/arm64/boot/dts/rockchip/rk3588-nanopc-t6-pcie-ep.dtbo /media/<user>/RootFS/boot/
+# mount the SD card
+sudo mount /dev/<the SD card device>1 ./sd_mount
+sudo cp buildroot/output/build/linux-custom/arch/arm64/boot/dts/rockchip/rk3588-nanopc-t6.dtb ./sd_mount/boot/
+sudo cp buildroot/output/build/linux-custom/arch/arm64/boot/dts/rockchip/rk3588-nanopc-t6-pcie-ep.dtbo ./sd_mount/boot/
+# Create an extlinux file for the T6 (fill with content below)
+sudo vi ./sd_mount/boot/exlinux/exlinux.conf.t6
 ```
 
-You can edit `/media/<user>/RootFS/boot/extlinux/extlinux.conf`
-
-For example :
+Fill `extlinux.conf.t6` with :
 
 ```
 label FriendlyElec NanoPC T6 endpoint mode
@@ -196,47 +203,78 @@ label FriendlyElec NanoPC T6 endpoint mode
   append root=/dev/mmcblk1p1 rw earlycon rootwait
 ```
 
-Note this will only apply to Linux, so if you change board completely you will need to generate an adequate uboot for it.
+Now if you want to use the SD card on the NanoPC-T6, replace `/boot/extlinux/extlinux.conf` by `extlinux.conf.t6`. (You can simply rename the old `extlinux.conf` to `extlinux.conf.cm3588` and `extlinux.conf.t6` to `extlinux.conf`).
+
+Note this will only apply to Linux, so if you change board completely you will need to generate an adequate U-Boot for it.
 Here both the FriendlyElec NanoPC-T6 and CM3588 rely on the exact same SoC and their schematics are highly similar so it will be possible to boot the same uboot on both boards. This will not apply to other boards.
 
-### (Optional) Copy Linux kernel sources for OoT build on embedded board
+### 10. Launch and test on board and install desktop environment
 
-In order to build the eNVMe firmware (Linux PCI endpoint function) `pci-epf-nvme.c` on the board directly, out-of-tree (OoT), we will need the kernel sources on the board.
-
-```shell
-# From the work directory
-
-# Copy the Linux sources
-sudo cp -r linux/. /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/
-# Remove the .git directory (Do this otherwise Oot built .ko will take git commit hash in version and will refuse to be inserted)
-sudo rm -rf /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/.git
-# Copy the .config from Buildroot
-sudo cp buildroot/output/build/linux-custom/.config /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/
-# Copy Module.symvers
-sudo cp buildroot/output/build/linux-custom/Module.symvers /media/<user>/RootFS/lib/modules/6.12.0-rc3/build/
-
-# Copy the firmware (allows to build on embedded board)
-cp -r ../firmware /media/<user>/RootFS/home/ubuntu/
-```
-
-### 10. Launch and test on board
-
-- Test boot
+- Test boot, put SD card inside CM3588 + NAS Kit or NanoPC-T6 and boot
+- Follow boot console on UART (baudrate 1,500,000) or wait for a graphic output (HDMI OUT0 on the CM3588 NAS Kit)
+- Login with the user `ubuntu` and the password you set (e.g., `ubuntu`). This can be done via UART or with HDMI and a keyboard
+- Connect an ethernet cable for internet (if you prefer you can now use SSH)
 - Update apt sources (do not upgrade, it might replace our custom kernel by the standard Ubuntu kernel)
-- Install whatever is necessary
+- Install whatever is necessary (this might take some time)
 
 ```shell
 sudo apt update
+# Install all tools for building the firmware
 sudo apt install libncurses-dev gawk flex bison openssl libssl-dev dkms libelf-dev libudev-dev libpci-dev libiberty-dev autoconf llvm build-essential
+# Since we use a custon kernel the "flash-kernel" package should not be used, disable with
+sudo mv /etc/initramfs/post-update.d/flash-kernel /etc/initramfs/post-update.d/flash-kernel.disabled
+# Reconfigure initramfs
+sudo dpkg --configure -a
+sudo apt install -f
+# Install PCILeech
+./setup_pcileech.sh
+# Install a full desktop environment (XFCE)
+sudo apt install xserver-xorg-video-fbdev xserver-xorg-core xinit \
+                 xserver-xorg-input-all mesa-utils xterm lightdm lightdm-gtk-greeter \
+                 xserver-xorg-input-libinput xserver-xorg-input-evdev \
+                 xfce4 xfce4-terminal xfce4-session xfce4-panel xfce4-settings \
+                 xfwm4 xfdesktop4 thunar xfce4-appfinder  xfce4-notifyd xfce4-power-manager \
+                 mousepad gvfs gvfs-backends gvfs-fuse
+# Set the terminal for the desktop environment
+sudo update-alternatives --install /usr/bin/x-terminal-emulator x-terminal-emulator /usr/bin/xfce4-terminal 50
+sudo update-alternatives --config x-terminal-emulator
+# Snap is not working, so remove it
+sudo apt remove snapd
+# Install firefox without snap
+sudo add-apt-repository ppa:mozillateam/ppa
+echo '
+Package: *
+Pin: release o=LP-PPA-mozillateam
+Pin-Priority: 1001
+Package: firefox
+Pin: version 1:1snap*
+Pin-Priority: -1
+' | sudo tee /etc/apt/preferences.d/mozilla-firefox
+# Install firefox
+sudo apt install firefox
+# Prepare for OoT build
+cd /lib/modules/$(uname -r)/build
+sudo make modules_prepare
+# Reboot, you should now have a desktop environment and login
+sudo reboot
 ```
 
-### OoT Build
+### Build the eNVMe firmware (OoT Build)
 
-See [firmware/README.md](../firmware/README.md).
+Build and install the eNVMe firmware (without this you'll only have (non-evil) NVMe functionality)
 
-#### OoT build on embedded board
+```shell
+# On the embedded board
+cd evil_nvme_oot
+# Build
+make
+# Install the eNVMe firmware
+sudo make install
+```
 
-If you followed the instructions to prepare the platform from scratch you will need to first run:
+If you want to modify the firmware directly on the board you can edit pci-epf.c and build/install as above.
+
+**Note:** Make sure you did the commands (are done above)
 
 ```shell
 cd /lib/modules/$(uname -r)/build
@@ -262,21 +300,25 @@ make[1]: Leaving directory '/usr/lib/modules/6.12.0-rc3/build'
 make: *** [Makefile:24: default] Error 2
 ```
 
+For more info about the firmware see [firmware/README.md](../firmware/README.md).
+
 ## Launching the eNVMe
 
 ```shell
 sudo ./nvme-epf --model "Trust me 980 pro" --loop /dev/... start
 ```
 
-## Recompile and update the kernel
+## (Dev) Recompiling and updating the kernel
 
-in `work/buildroot` (you must already have built it once and setup everything) :
+If you want to do some kernel hacking you can edit the kernel source in `work/linux`.
+
+You can rebuild the kernel in `work/buildroot` (you must already have built it once and setup everything) run :
 
 ```shell
 make linux-rebuild all
 ```
 
-The kernel itself will be `output/images/Image`.
+The kernel itself will be `output/images/Image`, and the modules in `output/build/linux-custom`.
 
 Update it on the SD card :
 
@@ -289,3 +331,31 @@ cd buildroot/output/build/linux-custom
 # Install the drivers (modules) in the RootFS
 sudo ARCH=arm64 CROSS_COMPILE=aarch64-linux-gnu- INSTALL_MOD_PATH=/media/<user>/ make modules_install
 ```
+
+### (Dev) Changing the kernel configuration
+
+In `work/buildroot` you can edit, save, rebuild
+
+```shell
+# Edit the config
+make linux-menuconfig
+# Update the board config file (optional)
+make linux-update-config
+# Rebuild the kernel
+make linux-rebuild all
+```
+
+Then update the SD card as above (kernel + modules)
+
+### (Dev) Changing the kernel to a new version
+
+If you change `work/linux` drastically (e.g., new kernel version, or working with `linux-next`), clean the Linux directory in buildroot and rebuild.
+
+```shell
+# Clean linux in buildroot
+make linux-dirclean
+# Rebuild
+make linux-rebuild all
+```
+
+With a new kernel will come new kernel options, you can select then and then save them with `make linux-update-config` as shown above.
