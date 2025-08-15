@@ -3,7 +3,8 @@
 # Makefile for PCI Endpoint Functions
 #
 
-obj-m	+= pci-epf-nvme.o
+obj-m	+= nvmet-pci-epf.o
+nvmet-pci-epf-y	+= pci-epf.o
 
 # Remove the -Werror=date-time flag for this module.
 # We want to use __DATE__ and __TIME__ to show when it was built.
@@ -28,7 +29,7 @@ endif
 
 install:
 ifeq ($(shell uname -m),aarch64)
-	cp pci-epf-nvme.ko /lib/modules/$(shell uname -r)/kernel/drivers/pci/endpoint/functions/
+	cp nvmet-pci-epf.ko /lib/modules/$(shell uname -r)/kernel/drivers/nvme/target/
 else
 	@echo "Install is only for embedded platform"
 endif
