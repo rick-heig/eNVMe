@@ -213,7 +213,7 @@ Here both the FriendlyElec NanoPC-T6 and CM3588 rely on the exact same SoC and t
 - Test boot, put SD card inside CM3588 + NAS Kit or NanoPC-T6 and boot
 - Follow boot console on UART (baudrate 1,500,000) or wait for a graphic output (HDMI OUT0 on the CM3588 NAS Kit)
 - Login with the user `ubuntu` and the password you set (e.g., `ubuntu`). This can be done via UART or with HDMI and a keyboard
-- Connect an ethernet cable for internet (if you prefer you can now use SSH)
+- Connect an ethernet cable for internet (if you prefer you can now use SSH for the console)
 - Update apt sources (do not upgrade, it might replace our custom kernel by the standard Ubuntu kernel)
 - Install whatever is necessary (this might take some time)
 
@@ -359,3 +359,14 @@ make linux-rebuild all
 ```
 
 With a new kernel will come new kernel options, you can select then and then save them with `make linux-update-config` as shown above.
+
+## Creating the SD card image
+
+In the `work` directory
+
+```shell
+# Copy the raw SD card image (from a 8GB SD, otherwise, make partition smaller and truncate))
+sudo dd if=/dev/<the SD card device> of=sdcard_envme_ubuntu2404_$(date '+%y%m%d').img status=progress bs=4M
+# Compress with XZ
+xz -kz9eT$(nproc) ./sdcard_envme_ubuntu2404_$(date '+%y%m%d').img
+```
