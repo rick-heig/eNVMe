@@ -6,6 +6,14 @@ Read more about eNVMe in our [**Paper:** Pandora's Box in Your SSD: The Untold D
 
 ---
 
+## 15.08.25 New version available eNVMe 1.1.0
+
+- Update to Linux kernel 6.15
+- HDMI support and graphical desktop environment (XCFE)
+- New functionalities
+
+---
+
 A FriendlyElec NanoPC-T6 board modified to act as an NVMe drive :
 
 ![T6](res/pictures/T6.jpg)
