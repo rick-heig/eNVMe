@@ -1,12 +1,12 @@
 # *evil* NVMe firmware
 
-The eNVMe firmware is a PCI endpoint function driver for the Linux PCI endpoint framework (https://www.kernel.org/doc/html/latest/PCI/endpoint/index.html).
+The eNVMe firmware is a PCI endpoint function driver for the Linux PCI endpoint framework (https://www.kernel.org/doc/html/latest/PCI/endpoint/index.html). It is based on the following mainline NVMe PCI endpoint : https://elixir.bootlin.com/linux/v6.15/source/drivers/nvme/target/pci-epf.c
 
 ## Building
 
 The eNVMe firmware can be built out-of-tree (OoT) on the host computer or in the embedded platform, to do so make sure you followed the [doc/platform.md](../doc/platform.md) instructions to setup.
 
-The firmware can be built from the host or embedded platform with `make`. If building on the embedded platform it can be installed with `sudo make install`, if built from the host the `pci-epf-nvme.ko` file can be copied on the SD card on `/lib/modules/6.12.0-rc3/kernel/drivers/pci/endpoint/functions/`.
+The firmware can be built from the host or embedded platform with `make`. If building on the embedded platform it can be installed with `sudo make install`, if built from the host the `nvmet-pci-epf.ko` file can be copied on the SD card on `/lib/modules/6.15.0/kernel/drivers/nvme/target/`.
 
 ## Launching
 
@@ -19,23 +19,24 @@ Usage:
     nvme-epf [options] start
     nvme-epf stop
 Start command options:
-  --debug-epf               : Turn on nvme epf debug messages
-  --debug-nvme              : Turn on nvme fabrics debug messages
-  --debug-pci               : Turn on pci controller debug messages
-  --debug                   : Turn on epf, nvme and pci kernel debug messages
-  --disable-dma             : Disable use of DMA (use mmio transfers)
-  --model <str>             : Use <str> as device model name
-                              (default: Linux-pci-epf)
-  --mdts <size (KB)>        : Set maximum command transfer size
-                              (default 128 KB)
-  --buffered-io             : Used buffered IOs on the target
-                              (default: no).
-  --nrioq <num>             : Set maximum number of I/O queues
-                              (default: number of CPUs).
-  --loop <path>             : Use file or block device with nvme_loop target
-                              (default: use null_blk and /dev/nullb0).
-  --tcp <addr> <port> <nqn> : Connect to nvme_tcp target.
-  --sched <sched>           : Use the <sched> I/O scheduler for the loop device
+  --debug-pci        : Turn on pci controller debug messages
+  --debug-nvme       : Turn on nvme target core debug messages
+  --debug-epf        : Turn on nvme PCI endpoint target debug messages
+  --debug            : Turn on epf, nvme and pci kernel debug messages
+  --nomsix           : Do not enable MSI-X (Default: enabled)
+  --nomsi            : Do not enable MSI (Default: enabled)
+  --mdts <size (KB)> : Set maximum command transfer size
+                       (default 128 KB)
+  --mqes <num>       : Set maximum queue size
+  --buffered-io      : Used buffered IOs on the target
+                       (default: no).
+  --nrioq <num>      : Set maximum number of I/O queues
+                       (default: number of CPUs).
+  --nsdev <path>     : Use file or block device for the namespace
+                       (default: use null_blk and /dev/nullb0).
+  --sched <sched>    : Use the <sched> I/O scheduler for the NS device
+  --bs < LBA size>   : Specify null_blk LBA size (Default: 4096)
+  --rot              : Create a null_blk device with rotational=1
 ```
 
 For example:
@@ -47,6 +48,8 @@ sudo nvme-epf --loop /dev/sda --model "evil NVMe device" start
 ```
 
 If there is no need to use backend storage the `--loop` option can be omitted. This will result in a "null" backend, no data will be stored, zeroes will be read. You can also use ram block devices e.g., `/dev/ram0` or any other block device.
+
+Note: The `--loop` option is the same as (an alias for) `--nsdev`.
 
 ## Functionalities
 
